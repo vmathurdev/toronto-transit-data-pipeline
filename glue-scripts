@@ -1,0 +1,125 @@
+# csv_to_parquet.py
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.sql import functions as F
+from pyspark.sql.types import *
+from datetime import datetime
+import logging
+# Set up logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+# Get job parameters
+args = getResolvedOptions(sys.argv, [
+ 'JOB_NAME',
+ 'source_database',
+ 'source_table_name',
+ 'target_bucket'
+])
+# Initialize Glue context
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+def clean_and_transform_data(df):
+ """
+ Clean and transform the transit trip data
+ """
+ logger.info("Starting data cleaning and transformation")
+ # Define schema expectations
+ expected_columns = [
+ 'trip_id', 'vehicle_id', 'route_id', 'start_time',
+ 'end_time', 'distance_km', 'status'
+ ]
+ # Check if all expected columns exist
+ missing_cols = set(expected_columns) - set(df.columns)
+ if missing_cols:
+ logger.warning(f"Missing columns: {missing_cols}")
+ # Data cleaning operations
+ df_cleaned = df.filter(
+ # Remove records with null trip_id (primary key)
+ F.col('trip_id').isNotNull() &
+ # Remove records with invalid vehicle_id format
+ F.col('vehicle_id').rlike('^[Vv][0-9]{3}$') &
+ # Remove records with invalid route_id format
+ F.col('route_id').rlike('^R[0-9]{2}$') &
+ # Remove records with null timestamps
+ F.col('start_time').isNotNull() &
+ F.col('end_time').isNotNull() &
+ # Remove records with negative or zero distance
+ (F.col('distance_km') > 0)
+ )
+ # Standardize data formats
+ df_transformed = df_cleaned.select(
+ F.col('trip_id').cast(StringType()).alias('trip_id'),
+ F.upper(F.col('vehicle_id')).alias('vehicle_id'),
+ F.upper(F.col('route_id')).alias('route_id'),
+ F.to_timestamp(F.col('start_time'), 'yyyy-MM-dd\'T\'HH:mm:ss').alias('start_time'),
+ F.to_timestamp(F.col('end_time'), 'yyyy-MM-dd\'T\'HH:mm:ss').alias('end_time'),
+ F.col('distance_km').cast(DoubleType()).alias('distance_km'),
+ F.lower(F.trim(F.col('status'))).alias('status')
+ )
+ # Add derived columns
+ df_final = df_transformed.withColumn(
+ 'trip_duration_minutes',
+ F.round((F.col('end_time').cast('long') - F.col('start_time').cast('long')) / 60, 2)
+ ).withColumn(
+ 'trip_date',
+ F.to_date(F.col('start_time'))
+ ).withColumn(
+ 'year',
+ F.year(F.col('start_time'))
+ ).withColumn(
+ 'month',
+ F.month(F.col('start_time'))
+ ).withColumn(
+ 'day',
+ F.dayofmonth(F.col('start_time'))
+ )
+ # Data quality checks
+ total_records = df.count()
+ cleaned_records = df_final.count()
+ logger.info(f"Data quality check: {cleaned_records}/{total_records} records passed cleaning")
+ if cleaned_records == 0:
+ raise Exception("No records passed data quality checks")
+ return df_final
+def write_partitioned_parquet(df, target_path):
+ """
+ Write DataFrame to S3 as partitioned Parquet files
+ """
+ logger.info(f"Writing partitioned data to {target_path}")
+ df.write \
+ .mode('append') \
+ .partitionBy('year', 'month', 'day') \
+ .parquet(target_path)
+ logger.info("Successfully wrote partitioned Parquet files")
+try:
+ # Read data from Glue catalog
+ logger.info(f"Reading data from {args['source_database']}.{args['source_table_name']}")
+ datasource = glueContext.create_dynamic_frame.from_catalog(
+ database=args['source_database'],
+ table_name=args['source_table_name']
+ )
+ # Convert to Spark DataFrame for easier manipulation
+ df = datasource.toDF()
+ logger.info(f"Read {df.count()} records from source")
+ # Clean and transform data
+ df_processed = clean_and_transform_data(df)
+ # Write to S3 as partitioned Parquet
+ target_path = f"s3://{args['target_bucket']}/processed-trip-data/"
+ write_partitioned_parquet(df_processed, target_path)
+ # Log summary statistics
+ logger.info("=== Job Summary ===")
+ logger.info(f"Records processed: {df_processed.count()}")
+ logger.info(f"Status distribution:")
+ df_processed.groupBy('status').count().show()
+ logger.info("Job completed successfully")
+except Exception as e:
+ logger.error(f"Job failed with error: {str(e)}")
+ raise
+finally:
+ job.commit()
