@@ -19,3 +19,15 @@ This solution ingests, transforms, and aggregates trip data from city-operated t
 6. Second Glue ETL → Aggregates metrics → Loads to RDS PostgreSQL
 7. Dimensional tables → `dim_vehicles`, `dim_routes` for normalized querying
 8. Monitoring & alerts → CloudWatch, SNS
+
+
+
+---
+
+### 📍 References
+```markdown
+## 11. References
+
+- GitHub Source Code: [https://github.com/vmathurdev/toronto-transit-data-pipeline](https://github.com/vmathurdev/toronto-transit-data-pipeline)
+- Terraform Docs: [https://www.terraform.io/docs](https://www.terraform.io/docs)
+- AWS Glue Docs: [https://docs.aws.amazon.com/glue/](https://docs.aws.amazon.com/glue/)
