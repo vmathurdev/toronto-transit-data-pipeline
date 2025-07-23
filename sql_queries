@@ -1,0 +1,147 @@
+#Daily Ridership Summary
+-- Daily Ridership Summary Query
+SELECT
+ trip_date,
+ COUNT(trip_id) as total_trips,
+ COUNT(DISTINCT vehicle_id) as active_vehicles,
+ COUNT(DISTINCT route_id) as active_routes,
+ SUM(distance_km) as total_distance_km,
+ AVG(distance_km) as avg_trip_distance,
+ AVG(trip_duration_minutes) as avg_trip_duration,
+ SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_trips,
+ SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) as cancelled_trips,
+ SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress_trips,
+ ROUND(
+ SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) * 100.0 / COUNT(trip_id),
+ 2
+ ) as completion_rate_percent
+FROM processed_trip_data
+WHERE trip_date >= current_date - interval '30' day
+GROUP BY trip_date
+ORDER BY trip_date DESC;
+
+#Top Routes Analysis (Past 7 Days)
+-- Top Routes Over Past 7 Days
+WITH route_metrics AS (
+ SELECT
+ route_id,
+ COUNT(trip_id) as total_trips,
+ SUM(distance_km) as total_distance,
+ AVG(distance_km) as avg_distance,
+ AVG(trip_duration_minutes) as avg_duration,
+ COUNT(DISTINCT vehicle_id) as vehicles_used,
+ SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_trips,
+ ROUND(
+ SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) * 100.0 / COUNT(trip_id),
+ 2
+ ) as completion_rate
+ FROM processed_trip_data
+ WHERE trip_date >= current_date - interval '7' day
+ GROUP BY route_id
+),
+ranked_routes AS (
+ SELECT
+ *,
+ ROW_NUMBER() OVER (ORDER BY total_trips DESC) as trip_rank,
+ ROW_NUMBER() OVER (ORDER BY total_distance DESC) as distance_rank,
+ ROW_NUMBER() OVER (ORDER BY completion_rate DESC) as performance_rank
+ FROM route_metrics
+)
+SELECT
+ route_id,
+ total_trips,
+ total_distance,
+ avg_distance,
+ avg_duration,
+ vehicles_used,
+ completion_rate,
+ trip_rank,
+ distance_rank,
+ performance_rank,
+ CASE
+ WHEN trip_rank <= 5 THEN 'High Volume'
+ WHEN completion_rate >= 95 THEN 'High Performance'
+ WHEN completion_rate < 85 THEN 'Needs Attention'
+ ELSE 'Standard'
+ END as route_category
+FROM ranked_routes
+ORDER BY total_trips DESC;
+
+# Outlier Detection Query
+-- Outlier Trip Detection
+WITH trip_stats AS (
+ SELECT
+ route_id,
+ AVG(distance_km) as avg_distance,
+ STDDEV(distance_km) as stddev_distance,
+ AVG(trip_duration_minutes) as avg_duration,
+ STDDEV(trip_duration_minutes) as stddev_duration,
+ PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY distance_km) as q1_distance,
+ PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY distance_km) as q3_distance,
+ PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY trip_duration_minutes) as q1_duration,
+ PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY trip_duration_minutes) as q3_duration
+ FROM processed_trip_data
+ WHERE status = 'completed'
+ AND trip_date >= current_date - interval '30' day
+ GROUP BY route_id
+),
+outlier_analysis AS (
+ SELECT
+ t.*,
+ s.avg_distance,
+ s.avg_duration,
+ -- Distance outliers using IQR method
+ CASE
+ WHEN t.distance_km < (s.q1_distance - 1.5 * (s.q3_distance - s.q1_distance))
+ OR t.distance_km > (s.q3_distance + 1.5 * (s.q3_distance - s.q1_distance))
+ THEN true
+ ELSE false
+ END as is_distance_outlier,
+ -- Duration outliers using IQR method
+ CASE
+ WHEN t.trip_duration_minutes < (s.q1_duration - 1.5 * (s.q3_duration - s.q1_duration))
+ OR t.trip_duration_minutes > (s.q3_duration + 1.5 * (s.q3_duration - s.q1_duration))
+ THEN true
+ ELSE false
+ END as is_duration_outlier,
+ -- Speed calculation (km/h)
+ ROUND(t.distance_km / (t.trip_duration_minutes / 60.0), 2) as avg_speed_kmh
+ FROM processed_trip_data t
+ JOIN trip_stats s ON t.route_id = s.route_id
+ WHERE t.status = 'completed'
+ AND t.trip_date >= current_date - interval '7' day
+)
+SELECT
+ trip_id,
+ vehicle_id,
+ route_id,
+ start_time,
+ end_time,
+ distance_km,
+ trip_duration_minutes,
+ avg_speed_kmh,
+ CASE
+ WHEN is_distance_outlier AND is_duration_outlier THEN 'Both Distance and Duration'
+ WHEN is_distance_outlier THEN 'Distance Only'
+ WHEN is_duration_outlier THEN 'Duration Only'
+ ELSE 'Normal'
+ END as outlier_type,
+ CASE
+ WHEN avg_speed_kmh > 80 THEN 'Excessive Speed'
+ WHEN avg_speed_kmh < 5 THEN 'Unusually Slow'
+ WHEN distance_km > avg_distance * 2 THEN 'Excessive Distance'
+ WHEN trip_duration_minutes > avg_duration * 2 THEN 'Excessive Duration'
+ ELSE 'Review Required'
+ END as potential_issue
+FROM outlier_analysis
+WHERE is_distance_outlier = true
+ OR is_duration_outlier = true
+ OR avg_speed_kmh > 80
+ OR avg_speed_kmh < 5
+ORDER BY
+ CASE
+ WHEN avg_speed_kmh > 80 OR avg_speed_kmh < 5 THEN 1
+ WHEN is_distance_outlier AND is_duration_outlier THEN 2
+ ELSE 3
+ END,
+ start_time DESC;
