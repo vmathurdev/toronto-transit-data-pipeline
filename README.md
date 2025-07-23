@@ -24,9 +24,8 @@ This solution ingests, transforms, and aggregates trip data from city-operated t
 
 ---
 
-### 📍 References
-```markdown
-## 11. References
+
+## References
 
 - GitHub Source Code: [https://github.com/vmathurdev/toronto-transit-data-pipeline](https://github.com/vmathurdev/toronto-transit-data-pipeline)
 - Terraform Docs: [https://www.terraform.io/docs](https://www.terraform.io/docs)
